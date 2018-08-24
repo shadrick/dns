@@ -31,12 +31,16 @@ type Conn struct {
 	tsigRequestMAC string
 }
 
+// A ConnDialer provides a function for complete control over setting up the connection to a remote server
+type ConnDialer func(*net.Dialer, string, string, *tls.Config, bool) (net.Conn, error)
+
 // A Client defines parameters for a DNS client.
 type Client struct {
-	Net       string      // if "tcp" or "tcp-tls" (DNS over TLS) a TCP query will be initiated, otherwise an UDP one (default is "" for UDP)
-	UDPSize   uint16      // minimum receive buffer for UDP messages
-	TLSConfig *tls.Config // TLS connection configuration
-	Dialer    *net.Dialer // a net.Dialer used to set local address, timeouts and more
+	Net        string      // if "tcp" or "tcp-tls" (DNS over TLS) a TCP query will be initiated, otherwise an UDP one (default is "" for UDP)
+	UDPSize    uint16      // minimum receive buffer for UDP messages
+	TLSConfig  *tls.Config // TLS connection configuration
+	Dialer     *net.Dialer // a net.Dialer used to set local address, timeouts and more
+	DialerFunc ConnDialer  // a ConnDialer used for full control over the setup of the net.Conn used for transport
 	// Timeout is a cumulative timeout for dial, write and read, defaults to 0 (disabled) - overrides DialTimeout, ReadTimeout,
 	// WriteTimeout when non-zero. Can be overridden with net.Dialer.Timeout (see Client.ExchangeWithDialer and
 	// Client.Dialer) or context.Context.Deadline (see the deprecated ExchangeContext)
@@ -84,6 +88,14 @@ func (c *Client) writeTimeout() time.Duration {
 	return dnsTimeout
 }
 
+func defaultDialerFunc(d *net.Dialer, network string, address string, c *tls.Config, useTLS bool) (net.Conn, error) {
+	if useTLS {
+		return tls.DialWithDialer(d, network, address, c)
+	} else {
+		return d.Dial(network, address)
+	}
+}
+
 // Dial connects to the address on the named network.
 func (c *Client) Dial(address string) (conn *Conn, err error) {
 	// create a new dialer with the appropriate timeout
@@ -92,6 +104,10 @@ func (c *Client) Dial(address string) (conn *Conn, err error) {
 		d = net.Dialer{Timeout: c.getTimeoutForRequest(c.dialTimeout())}
 	} else {
 		d = net.Dialer(*c.Dialer)
+	}
+
+	if c.DialerFunc == nil {
+		c.DialerFunc = defaultDialerFunc
 	}
 
 	network := "udp"
@@ -114,11 +130,7 @@ func (c *Client) Dial(address string) (conn *Conn, err error) {
 	}
 
 	conn = new(Conn)
-	if useTLS {
-		conn.Conn, err = tls.DialWithDialer(&d, network, address, c.TLSConfig)
-	} else {
-		conn.Conn, err = d.Dial(network, address)
-	}
+	conn.Conn, err = c.DialerFunc(&d, network, address, c.TLSConfig, useTLS)
 	if err != nil {
 		return nil, err
 	}
